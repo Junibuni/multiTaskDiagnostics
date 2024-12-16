@@ -50,6 +50,7 @@ logs/
 models/
 outputs/
 results/
+data/
 checkpoints/
 
 # Ignore IDE specific files
