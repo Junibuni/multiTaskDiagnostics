@@ -1,49 +1,64 @@
 import os
-
 import pandas as pd
 import numpy as np
+import torch
 from PIL import Image
+
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 
-class ChestXrayDataset(Dataset):
-    def __init__(self, csv_file, img_dir, transform=None, task='classification'):
-        self.data = pd.read_csv(csv_file)
+LABELS = [
+    "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration", "Mass", "Nodule",
+    "Pneumonia", "Pneumothorax", "Consolidation", "Edema", "Emphysema", "Fibrosis",
+    "Pleural_Thickening", "Hernia"
+]
+
+def load_label_vector(finding_labels):
+    vector = np.zeros(len(LABELS), dtype=np.float32)
+    for label in finding_labels.split('|'):
+        if label in LABELS:
+            vector[LABELS.index(label)] = 1
+    return vector
+class ChestXrayMultiTaskDataset(Dataset):
+    def __init__(self, img_dir, meta_file, bbox_file=None, split_file=None, transform=None):
         self.img_dir = img_dir
+        self.meta_data = pd.read_csv(meta_file)
         self.transform = transform
-        self.task = task
+
+        if bbox_file:
+            self.bbox_data = pd.read_csv(bbox_file)
+            self.bbox_data = self.bbox_data.set_index("Image Index")
+        else:
+            self.bbox_data = None
+
+        if split_file:
+            with open(split_file, 'r') as f:
+                split_images = set(f.read().splitlines())
+            self.meta_data = self.meta_data[self.meta_data["Image Index"].isin(split_images)]
 
     def __len__(self):
-        return len(self.data)
+        return len(self.meta_data)
 
     def __getitem__(self, idx):
-        if isinstance(idx, int):
-            row = self.data.iloc[idx]
-        else:
-            row = self.data.loc[idx]
-        
-        img_path = os.path.join(self.img_dir, row['Image Index'])
-        image = Image.open(img_path).convert('RGB')
+        row = self.meta_data.iloc[idx]
+        img_path = os.path.join(self.img_dir, row["Image Index"])
+        image = Image.open(img_path).convert("RGB")
         
         if self.transform:
             image = self.transform(image)
-        
-        label = row['Finding Labels']
-        
-        if self.task == 'classification':
-            # Convert label to binary format (e.g., 0 for normal, 1 for abnormal)
-            label = 1 if 'No Finding' not in label else 0
-            return image, label
-        elif self.task == 'segmentation':
-            # Placeholder: Load segmentation mask (if available)
-            mask = np.zeros(image.size[::-1], dtype=np.uint8)  # Dummy mask
-            return image, mask
-        elif self.task == 'detection':
-            # Placeholder: Return bounding box data (if available)
-            bbox = np.array([0, 0, image.size[0], image.size[1]])  # Dummy bbox
-            return image, bbox
+
+        label_vector = load_label_vector(row["Finding Labels"])
+
+        if self.bbox_data is not None and row["Image Index"] in self.bbox_data.index:
+            bboxes = self.bbox_data.loc[[row["Image Index"]]]
+            bbox_list = bboxes[["x", "y", "w", "h"]].values
+            bbox_tensor = torch.tensor([[x, y, x + w, y + h] for x, y, w, h in bbox_list], dtype=torch.float32)
         else:
-            raise ValueError(f"Unknown task type: {self.task}")
+            bbox_tensor = torch.zeros((0, 4), dtype=torch.float32)
+
+        return image, bbox_tensor, label_vector
+
+
 
 def get_transforms(input_size=224):
     return transforms.Compose([
@@ -52,28 +67,29 @@ def get_transforms(input_size=224):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-def create_dataloaders(csv_file, img_dir, batch_size=32, task='classification', input_size=224, split_ratios=(0.7, 0.2, 0.1)):
-    data = pd.read_csv(csv_file)
-    
-    data = data.sample(frac=1).reset_index(drop=True)
-    
-    train_end = int(len(data) * split_ratios[0])
-    val_end = train_end + int(len(data) * split_ratios[1])
-    
-    train_data = data.iloc[:train_end]
-    val_data = data.iloc[train_end:val_end]
-    test_data = data.iloc[val_end:]
-    
+
+def create_dataloaders(img_dir, meta_file, bbox_file=None, train_split=None, test_split=None, batch_size=32, input_size=224):
     transform = get_transforms(input_size)
-    
-    train_dataset = ChestXrayDataset(train_data, img_dir, transform, task)
-    val_dataset = ChestXrayDataset(val_data, img_dir, transform, task)
-    test_dataset = ChestXrayDataset(test_data, img_dir, transform, task)
-    
+
+    train_dataset = ChestXrayMultiTaskDataset(
+        img_dir=img_dir,
+        meta_file=meta_file,
+        bbox_file=bbox_file,
+        split_file=train_split,
+        transform=transform
+    )
+
+    test_dataset = ChestXrayMultiTaskDataset(
+        img_dir=img_dir,
+        meta_file=meta_file,
+        bbox_file=bbox_file,
+        split_file=test_split,
+        transform=transform
+    )
+
     dataloaders = {
-        'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True),
-        'val': DataLoader(val_dataset, batch_size=batch_size, shuffle=False),
-        'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        "train": DataLoader(train_dataset, batch_size=batch_size, shuffle=True),
+        "test": DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     }
-    
+
     return dataloaders
