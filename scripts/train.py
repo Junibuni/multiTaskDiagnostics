@@ -1,114 +1,93 @@
-import os
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
+from torch import nn, optim
+from torch.utils.data import DataLoader
+from src.unified_model import UnifiedModel
 from utils.data_loader import create_dataloaders
-from src.unified_head import UnifiedModel
+from tqdm import tqdm
 
-def segmentation_loss_fn(pred, target):
-    smooth = 1e-6
-    intersection = (pred * target).sum()
-    dice_loss = 1 - (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
-    return dice_loss
+def train_model(model, dataloaders, criterion_class, criterion_box, optimizer, device, num_epochs=10):
+    model.to(device)
+    
+    for epoch in range(num_epochs):
+        print(f"Epoch {epoch + 1}/{num_epochs}")
+        print("-" * 10)
 
-def detection_loss_fn(pred, target):
-    return nn.SmoothL1Loss()(pred, target)
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                model.train()
+            else:
+                model.eval()
 
-def classification_loss_fn(pred, target):
-    return nn.BCEWithLogitsLoss()(pred, target)
+            running_loss = 0.0
+            running_class_loss = 0.0
+            running_box_loss = 0.0
+            
+            for inputs, bboxes, labels in tqdm(dataloaders[phase]):
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                bboxes = [bbox.to(device) for bbox in bboxes]
 
-def compute_total_loss(seg_loss, det_loss, cls_loss, seg_weight=1.0, det_weight=1.0, cls_weight=1.0):
-    return seg_weight * seg_loss + det_weight * det_loss + cls_weight * cls_loss
+                optimizer.zero_grad()
 
-def train_epoch(model, dataloader, optimizer, device, epoch, writer=None):
-    model.train()
-    epoch_loss = 0
+                with torch.set_grad_enabled(phase == 'train'):
+                    classification_output, detection_boxes, detection_scores = model(inputs)
+                    
+                    class_loss = criterion_class(classification_output, labels)
 
-    for batch_idx, (images, seg_targets, det_targets, cls_targets) in enumerate(dataloader):
-        images, seg_targets, det_targets, cls_targets = (
-            images.to(device),
-            seg_targets.to(device),
-            det_targets.to(device),
-            cls_targets.to(device),
-        )
+                    # Detection loss (bbox 있는 image만)
+                    box_loss = 0.0
+                    if any(bbox.shape[0] > 0 for bbox in bboxes):
+                        box_predictions = detection_boxes.view(-1, 4)
+                        box_targets = torch.cat([bbox for bbox in bboxes if bbox.shape[0] > 0])
+                        box_loss = criterion_box(box_predictions, box_targets)
 
-        optimizer.zero_grad()
+                    loss = class_loss + box_loss
 
-        seg_output, det_output, cls_output = model(images)
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
-        seg_loss = segmentation_loss_fn(seg_output, seg_targets)
-        det_loss = detection_loss_fn(det_output, det_targets)
-        cls_loss = classification_loss_fn(cls_output, cls_targets)
-        total_loss = compute_total_loss(seg_loss, det_loss, cls_loss)
+                running_loss += loss.item() * inputs.size(0)
+                running_class_loss += class_loss.item() * inputs.size(0)
+                running_box_loss += box_loss.item() * inputs.size(0) if box_loss > 0 else 0
 
-        total_loss.backward()
-        optimizer.step()
+            epoch_loss = running_loss / len(dataloaders[phase].dataset)
+            epoch_class_loss = running_class_loss / len(dataloaders[phase].dataset)
+            epoch_box_loss = running_box_loss / len(dataloaders[phase].dataset) if running_box_loss > 0 else 0
 
-        epoch_loss += total_loss.item()
+            print(f"{phase} Loss: {epoch_loss:.4f} | Class Loss: {epoch_class_loss:.4f} | Box Loss: {epoch_box_loss:.4f}")
 
-        if writer:
-            writer.add_scalar("Batch Loss", total_loss.item(), epoch * len(dataloader) + batch_idx)
+    print("Training complete")
 
-    return epoch_loss / len(dataloader)
 
-def validate_epoch(model, dataloader, device):
-    model.eval()
-    epoch_loss = 0
+def main():
+    img_dir = "data/raw/images"
+    meta_file = "data/raw/Data_Entry_2017_v2020.csv"
+    bbox_file = "data/raw/BBox_List_2017.csv"
+    train_split = "data/raw/data_train_val_list.txt"
+    test_split = "data/raw/data_test_list.txt"
 
-    with torch.no_grad():
-        for images, seg_targets, det_targets, cls_targets in dataloader:
-            images, seg_targets, det_targets, cls_targets = (
-                images.to(device),
-                seg_targets.to(device),
-                det_targets.to(device),
-                cls_targets.to(device),
-            )
+    dataloaders = create_dataloaders(
+        img_dir=img_dir,
+        meta_file=meta_file,
+        bbox_file=bbox_file,
+        train_split=train_split,
+        test_split=test_split,
+        batch_size=128,
+        input_size=224
+    )
 
-            seg_output, det_output, cls_output = model(images)
+    model = UnifiedModel(num_classes=14, num_detection_classes=1)
 
-            seg_loss = segmentation_loss_fn(seg_output, seg_targets)
-            det_loss = detection_loss_fn(det_output, det_targets)
-            cls_loss = classification_loss_fn(cls_output, cls_targets)
-            total_loss = compute_total_loss(seg_loss, det_loss, cls_loss)
+    criterion_class = nn.BCELoss()
+    criterion_box = nn.SmoothL1Loss()
 
-            epoch_loss += total_loss.item()
-
-    return epoch_loss / len(dataloader)
-
-def train():
-    batch_size = 16
-    num_epochs = 20
-    learning_rate = 1e-4
-    checkpoint_dir = "outputs/models/"
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
-    csv_file = "data/annotations/ChestX-ray14_labels.csv"
-    img_dir = "data/raw/images/"
-    checkpoint_path = "checkpoints/sam_vit_h_4b8939.pth"
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
 
-    dataloaders = create_dataloaders(csv_file, img_dir, batch_size=batch_size, task="multi-task")
-    train_loader = dataloaders["train"]
-    val_loader = dataloaders["val"]
-
-    model = UnifiedModel(sam_checkpoint=checkpoint_path, backbone_type="vit_h", num_classes=1, num_detection_classes=1)
-    model.to(device)
-
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-
-    writer = SummaryWriter(log_dir="outputs/logs/")
-
-    for epoch in range(num_epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch, writer)
-        val_loss = validate_epoch(model, val_loader, device)
-
-        print(f"Epoch {epoch + 1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.pth"))
-
-    writer.close()
-
+    train_model(model, dataloaders, criterion_class, criterion_box, optimizer, device, num_epochs=100)
+    
 if __name__ == "__main__":
-    train()
+    main()
