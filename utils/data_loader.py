@@ -32,8 +32,15 @@ class ChestXrayMultiTaskDataset(Dataset):
             self.bbox_data = None
 
         if split_file:
-            with open(split_file, 'r') as f:
-                split_images = set(f.read().splitlines())
+            if isinstance(split_file, str):  # filepath로 주어졌을때
+                with open(split_file, 'r') as f:
+                    split_images = set(f.read().splitlines())
+            elif isinstance(split_file, list):  # for train/val split
+                split_images = set(split_file)
+            else:
+                raise ValueError("split_file must be either a file path or a list of image indices.")
+            
+            # Filter metadata based on split images
             self.meta_data = self.meta_data[self.meta_data["Image Index"].isin(split_images)]
 
     def __len__(self):
@@ -68,14 +75,33 @@ def get_transforms(input_size=224):
     ])
 
 
-def create_dataloaders(img_dir, meta_file, bbox_file=None, train_split=None, test_split=None, batch_size=32, input_size=224):
+def create_dataloaders(
+    img_dir, meta_file, bbox_file=None, train_split=None, test_split=None,
+    batch_size=32, input_size=224, train_ratio=0.9
+):
     transform = get_transforms(input_size)
+
+    with open(train_split, 'r') as f:
+        train_images = f.read().splitlines()
+
+    np.random.shuffle(train_images)
+    split_idx = int(len(train_images) * train_ratio)
+    train_subset = train_images[:split_idx]
+    val_subset = train_images[split_idx:]
 
     train_dataset = ChestXrayMultiTaskDataset(
         img_dir=img_dir,
         meta_file=meta_file,
         bbox_file=bbox_file,
-        split_file=train_split,
+        split_file=train_subset,
+        transform=transform
+    )
+
+    val_dataset = ChestXrayMultiTaskDataset(
+        img_dir=img_dir,
+        meta_file=meta_file,
+        bbox_file=bbox_file,
+        split_file=val_subset,
         transform=transform
     )
 
@@ -89,7 +115,8 @@ def create_dataloaders(img_dir, meta_file, bbox_file=None, train_split=None, tes
 
     dataloaders = {
         "train": DataLoader(train_dataset, batch_size=batch_size, shuffle=True),
-        "test": DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        "val": DataLoader(val_dataset, batch_size=batch_size, shuffle=False),
+        "test": DataLoader(test_dataset, batch_size=batch_size, shuffle=False),
     }
 
     return dataloaders

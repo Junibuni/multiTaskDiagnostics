@@ -7,7 +7,9 @@ from tqdm import tqdm
 
 def train_model(model, dataloaders, criterion_class, criterion_box, optimizer, device, num_epochs=10):
     model.to(device)
-    
+    epoch_lost_list = []
+    class_loss_list = []
+    box_loss_list = []
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
         print("-" * 10)
@@ -56,8 +58,11 @@ def train_model(model, dataloaders, criterion_class, criterion_box, optimizer, d
             epoch_box_loss = running_box_loss / len(dataloaders[phase].dataset) if running_box_loss > 0 else 0
 
             print(f"{phase} Loss: {epoch_loss:.4f} | Class Loss: {epoch_class_loss:.4f} | Box Loss: {epoch_box_loss:.4f}")
-
+            epoch_lost_list.append(epoch_loss)
+            class_loss_list.append(epoch_class_loss)
+            box_loss_list.append(epoch_box_loss)
     print("Training complete")
+    return epoch_loss, class_loss, box_loss
 
 
 def main():
@@ -87,7 +92,35 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    train_model(model, dataloaders, criterion_class, criterion_box, optimizer, device, num_epochs=100)
+    epoch_loss, class_loss, box_loss = train_model(model, dataloaders, criterion_class, criterion_box, optimizer, device, num_epochs=100)
+    
+    import matplotlib.pyplot as plt
+    # Plot epoch loss
+    plt.figure()
+    plt.plot(epoch_loss, marker='o')
+    plt.title("Epoch Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid()
+    plt.show()
+
+    # Plot class loss
+    plt.figure()
+    plt.plot(class_loss, marker='o')
+    plt.title("Class Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid()
+    plt.show()
+
+    # Plot box loss
+    plt.figure()
+    plt.plot(box_loss, marker='o')
+    plt.title("Box Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid()
+    plt.show()
     
 if __name__ == "__main__":
     main()
