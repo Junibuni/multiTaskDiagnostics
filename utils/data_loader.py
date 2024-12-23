@@ -51,7 +51,7 @@ class ChestXrayMultiTaskDataset(Dataset):
         row = self.meta_data.iloc[idx]
         img_path = os.path.join(self.img_dir, row["Image Index"])
         image = Image.open(img_path).convert("RGB")
-        
+
         if self.transform:
             image = self.transform(image)
 
@@ -62,7 +62,7 @@ class ChestXrayMultiTaskDataset(Dataset):
             bbox_list = bboxes[["x", "y", "w", "h"]].values
             bbox_tensor = torch.tensor([[x, y, x + w, y + h] for x, y, w, h in bbox_list], dtype=torch.float32)
         else:
-            bbox_tensor = torch.zeros((0, 4), dtype=torch.float32)
+            bbox_tensor = torch.tensor([[-1, -1, -1, -1]], dtype=torch.float32)
 
         return image, bbox_tensor, label_vector
 
@@ -79,6 +79,21 @@ def compute_weights(meta_data, bbox_data):
     has_bbox = meta_data["Image Index"].isin(bbox_data.index)
     weights = has_bbox.map({True: 10.0, False: 1.0}).tolist()
     return weights
+
+def collate_fn(batch):
+    images, bboxes, labels = zip(*batch)
+
+    images = torch.stack(images)
+
+    labels = torch.stack([torch.tensor(label, dtype=torch.float32) for label in labels])
+
+    max_boxes = max(b.shape[0] for b in bboxes)
+    padded_bboxes = torch.stack([
+        torch.cat([b, torch.full((max_boxes - b.shape[0], 4), -1.0)]) if b.shape[0] < max_boxes else b
+        for b in bboxes
+    ])
+
+    return images, padded_bboxes, labels
 
 def create_dataloaders(
     img_dir, meta_file, bbox_file=None, train_split=None, test_split=None,
@@ -128,9 +143,9 @@ def create_dataloaders(
     sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
     dataloaders = {
-        "train": DataLoader(train_dataset, batch_size=batch_size, shuffle=True, sampler=sampler),
-        "val": DataLoader(val_dataset, batch_size=batch_size, shuffle=False),
-        "test": DataLoader(test_dataset, batch_size=batch_size, shuffle=False),
+        "train": DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn),
+        "val": DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn),
+        "test": DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn),
     }
 
     return dataloaders
