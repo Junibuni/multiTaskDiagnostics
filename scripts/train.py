@@ -102,7 +102,7 @@ def main():
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.grid()
-    plt.show()
+    plt.savefig("epoch_loss.png")
 
     # Plot class loss
     plt.figure()
@@ -111,7 +111,7 @@ def main():
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.grid()
-    plt.show()
+    plt.savefig("class_loss.png")
 
     # Plot box loss
     plt.figure()
@@ -120,7 +120,7 @@ def main():
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.grid()
-    plt.show()
+    plt.savefig("box_loss.png")
     
 if __name__ == "__main__":
     main()

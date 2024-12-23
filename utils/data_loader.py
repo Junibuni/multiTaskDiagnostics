@@ -6,6 +6,7 @@ from PIL import Image
 
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
+from torch.utils.data import WeightedRandomSampler
 
 LABELS = [
     "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration", "Mass", "Nodule",
@@ -74,6 +75,10 @@ def get_transforms(input_size=224):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
+def compute_weights(meta_data, bbox_data):
+    has_bbox = meta_data["Image Index"].isin(bbox_data.index)
+    weights = has_bbox.map({True: 10.0, False: 1.0}).tolist()
+    return weights
 
 def create_dataloaders(
     img_dir, meta_file, bbox_file=None, train_split=None, test_split=None,
@@ -88,6 +93,11 @@ def create_dataloaders(
     split_idx = int(len(train_images) * train_ratio)
     train_subset = train_images[:split_idx]
     val_subset = train_images[split_idx:]
+
+    train_meta_data = pd.read_csv(meta_file)
+    train_meta_data = train_meta_data[train_meta_data["Image Index"].isin(train_subset)]
+
+    bbox_data = pd.read_csv(bbox_file) if bbox_file else pd.DataFrame()
 
     train_dataset = ChestXrayMultiTaskDataset(
         img_dir=img_dir,
@@ -113,8 +123,12 @@ def create_dataloaders(
         transform=transform
     )
 
+    weights = compute_weights(train_meta_data, bbox_data)
+
+    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+
     dataloaders = {
-        "train": DataLoader(train_dataset, batch_size=batch_size, shuffle=True),
+        "train": DataLoader(train_dataset, batch_size=batch_size, shuffle=True, sampler=sampler),
         "val": DataLoader(val_dataset, batch_size=batch_size, shuffle=False),
         "test": DataLoader(test_dataset, batch_size=batch_size, shuffle=False),
     }
